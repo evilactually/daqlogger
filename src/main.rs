@@ -176,7 +176,7 @@ fn main() {
                     for row in 0..samples.len()/channels {
                         let row_offset = row*channels;
                         let time = Local::now();
-                        print!("{:?}", time.format("%Y-%m-%d %H:%M:%S").to_string());
+                        print!("{:?}", time.format("%Y-%m-%d %H:%M:%S.%3f").to_string());
                         for column in 0..channels {
                             //if column > 0 { print!(",") };
                             print!(", {}", samples[row_offset + column]);
