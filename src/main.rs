@@ -1,6 +1,7 @@
 extern crate clap;
 extern crate chrono;
 
+use chrono::TimeDelta;
 use core::ffi::c_char;
 use std::ffi::CString;
 use ni_daqmx_sys;
@@ -73,8 +74,10 @@ macro_rules! return_if_err {
 #[derive(Debug)]
 struct DAQVTask {
     task_handle : ni_daqmx_sys::TaskHandle,
-    data : Vec<ni_daqmx_sys::float64>,
-    pub channels : usize
+    samples : Vec<ni_daqmx_sys::float64>,
+    timestamps : Vec<DateTime<Local>>,
+    channels : usize,
+    sample_rate : ni_daqmx_sys::float64
 }
 
 impl DAQVTask {
@@ -110,19 +113,27 @@ impl DAQVTask {
             return_if_err!("DAQmxCfgSampClkTiming", ni_daqmx_sys::DAQmxCfgSampClkTiming(task_handle, std::ptr::null(), sample_rate, ni_daqmx_sys::DAQmx_Val_Rising, ni_daqmx_sys::DAQmx_Val_FiniteSamps, sample_count));
         }
 
-        let mut data = Vec::<ni_daqmx_sys::float64>::new();
-        data.resize((channels as usize)*(sample_count as usize), 0.0);
+        let mut samples = Vec::<ni_daqmx_sys::float64>::new();
+        let buffer_size = (channels as usize)*(sample_count as usize);
+        samples.resize(buffer_size, 0.0);
+
+        let mut timestamps = Vec::<DateTime<Local>>::new();
+        timestamps.resize(buffer_size, Local::now());
 
         Ok(DAQVTask {
             task_handle : task_handle,
-            data : data, // data buffer
+            samples : samples, // data buffer
+            timestamps : timestamps,
+            sample_rate : sample_rate,
             channels : channels.try_into().unwrap()
         })
     }
 
-    /// Read samples
-    fn read_samples(&mut self) -> Result<&[ni_daqmx_sys::float64], i32> {
+    /// Read samples, returns number of sampes read
+    fn acquire_samples(&mut self) -> Result<i32, i32> {
         let mut read : i32 = -1;
+
+        let start_time = Local::now();
 
         unsafe {
             // Start
@@ -134,19 +145,40 @@ impl DAQVTask {
                     ni_daqmx_sys::DAQmx_Val_Auto, 
                     10.0, 
                     ni_daqmx_sys::DAQmx_Val_GroupByScanNumber as u32, 
-                    self.data.as_mut_ptr(), 
-                    self.data.len() as u32, 
+                    self.samples.as_mut_ptr(), 
+                    self.samples.len() as u32, 
                     &mut read, std::ptr::null_mut()));
 
             // Stop
             return_if_err!("DAQmxStopTask", ni_daqmx_sys::DAQmxStopTask(self.task_handle))
         }
 
-        // return slice to buffer in case not all samples were read
-        return Ok(&self.data[0..read.try_into().unwrap_or(0)]);
+        // Fill timestamps
+        let period = TimeDelta::nanoseconds((1e9*(1.0/self.sample_rate)) as i64);
+        let p = start_time + period*2;
+        for i in 0..read {
+            let timestamp = start_time + period*i;
+            let i : usize = i.try_into().unwrap();
+            self.timestamps[i] = timestamp;
+        }
+
+        self.samples_read = read;
+
+        return read;
     }
 
+    /// Get read samples from the buffer
+    fn get_samples(self) -> Result<&[ni_daqmx_sys::float64], i32> {
+        // return slice to buffer in case not all samples were read
+        return Ok(&self.samples[0..read.try_into().unwrap()]);
+    }
+
+    fn get_timestamps(self) -> Result<&[ni_daqmx_sys::float64], i32> {
+        // return slice to buffer in case not all samples were read
+        return Ok(&self.timestamps[0..read.try_into().unwrap()]);
+    }
 }
+
 
 impl Drop for DAQVTask {
     /// Clean up
@@ -164,19 +196,28 @@ impl Drop for DAQVTask {
 }
 
 fn main() {
+
+    let s = 0.5;
+    let msf:f64 = (1000.0*s);
+    let msu:u32 = msf.floor() as u32;
+    println!("{}", msu);
     let args = Args::parse();
+    return;
 
     let mut daqmx = DAQVTask::new(&args.channels, MeasurementMode::RSE, args.rate, args.size);
     loop {
     match daqmx {
         Ok(ref mut task) => {
             let channels = task.channels;
+            task.channels = 1;
+            // mark start time
             match task.read_samples() {
                 Ok(samples) => {
                     for row in 0..samples.len()/channels {
                         let row_offset = row*channels;
                         let time = Local::now();
                         print!("{:?}", time.format("%Y-%m-%d %H:%M:%S.%3f").to_string());
+                        //print!("{:?}", time.format("%s").to_string());
                         for column in 0..channels {
                             //if column > 0 { print!(",") };
                             print!(", {}", samples[row_offset + column]);
